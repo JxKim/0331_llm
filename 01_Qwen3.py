@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 import re
-from transformers.models.qwen3 import Qwen3ForCausalLM
 
 
 # Qwen3-0.6B模型结构配置
@@ -561,6 +560,135 @@ def generate_text(input_ids,model:Qwen3Model,tokenizer:Qwen3Tokenizer,max_len:in
     res = tokenizer.decode(res_list)
     print(res)
     return res
+
+def load_qwen3_safetensors_weights(model: Qwen3Model, model_dir="model/Qwen3-0.6B"):
+    """
+    直接从本地 .safetensors 权重文件中读取Qwen3参数，并加载到当前手写的Qwen3Model结构中。
+
+    这个函数不实例化 HuggingFace 的 Qwen3ForCausalLM。
+    它做的事情是：
+        1. 读取 model.safetensors 中的 tensor
+        2. 将 HuggingFace 参数名映射到当前教学模型的参数名
+        3. 使用 strict=True 确认所有参数都完整对齐
+    """
+    from safetensors.torch import load_file
+
+    model_dir = Path(model_dir)
+    safetensors_path = model_dir / "model.safetensors"
+    if not safetensors_path.is_file():
+        raise FileNotFoundError(f"没有找到权重文件：{safetensors_path}")
+
+    hf_state = load_file(str(safetensors_path), device="cpu")
+
+    mapped_state = {
+        "tok_emb.weight": hf_state["model.embed_tokens.weight"],
+        "final_norm.scale": hf_state["model.norm.weight"],
+        # Qwen3配置中tie_word_embeddings=True。这里仍然兼容权重文件中显式保存lm_head.weight的情况。
+        "out_head.weight": hf_state.get("lm_head.weight", hf_state["model.embed_tokens.weight"]),
+    }
+
+    for i in range(model.cfg["num_hidden_layers"]):
+        hf_prefix = f"model.layers.{i}"
+        my_prefix = f"trf_blocks.{i}"
+
+        mapped_state[f"{my_prefix}.norm1.scale"] = hf_state[f"{hf_prefix}.input_layernorm.weight"]
+        mapped_state[f"{my_prefix}.norm2.scale"] = hf_state[f"{hf_prefix}.post_attention_layernorm.weight"]
+
+        mapped_state[f"{my_prefix}.att.q_proj.weight"] = hf_state[f"{hf_prefix}.self_attn.q_proj.weight"]
+        mapped_state[f"{my_prefix}.att.k_proj.weight"] = hf_state[f"{hf_prefix}.self_attn.k_proj.weight"]
+        mapped_state[f"{my_prefix}.att.v_proj.weight"] = hf_state[f"{hf_prefix}.self_attn.v_proj.weight"]
+        mapped_state[f"{my_prefix}.att.o_proj.weight"] = hf_state[f"{hf_prefix}.self_attn.o_proj.weight"]
+
+        mapped_state[f"{my_prefix}.att.q_norm.scale"] = hf_state[f"{hf_prefix}.self_attn.q_norm.weight"]
+        mapped_state[f"{my_prefix}.att.k_norm.scale"] = hf_state[f"{hf_prefix}.self_attn.k_norm.weight"]
+
+        mapped_state[f"{my_prefix}.ff.gate_proj.weight"] = hf_state[f"{hf_prefix}.mlp.gate_proj.weight"]
+        mapped_state[f"{my_prefix}.ff.up_proj.weight"] = hf_state[f"{hf_prefix}.mlp.up_proj.weight"]
+        mapped_state[f"{my_prefix}.ff.down_proj.weight"] = hf_state[f"{hf_prefix}.mlp.down_proj.weight"]
+
+    model.load_state_dict(mapped_state, strict=True)
+    return model
+
+def test_load_qwen3_safetensors(
+        model_dir="model/Qwen3-0.6B",
+        prompt="你好，请简单介绍一下你自己。",
+        max_new_tokens=8,
+        use_chat_template=True
+):
+    """
+    测试当前手写Qwen3Model能否直接加载本地 .safetensors 权重，并跑通自回归生成：
+        1. strict=True 参数加载
+        2. prefill阶段：完整prompt前向传播
+        3. decode阶段：每次只输入一个新token，并复用KV Cache
+        4. 打印最终生成结果
+
+    运行方式：
+        .venv/bin/python -c "import importlib.util; spec=importlib.util.spec_from_file_location('qwen3', '01_Qwen3.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); m.test_load_qwen3_safetensors()"
+    """
+    model_dir = Path(model_dir)
+    tokenizer = Qwen3Tokenizer(
+        tokenizer_file_path=model_dir / "tokenizer.json",
+        apply_chat_template=use_chat_template,
+        add_generation_prompt=use_chat_template,
+        add_thinking=False,
+    )
+    model = Qwen3Model(QWEN_CONFIG_06_B)
+
+    load_qwen3_safetensors_weights(model, model_dir)
+    model.eval()
+
+    input_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long)
+    final_output = input_ids.clone()
+    generated_ids = []
+    kv_cache = {}
+
+    with torch.no_grad():
+        # 1. prefill：完整prompt输入模型
+        output_logits = model(input_ids, cache=kv_cache)
+        logits = output_logits[:, -1, :]
+        next_token_id = torch.argmax(logits, dim=-1, keepdim=True)
+        generated_ids.append(next_token_id.item())
+        final_output = torch.cat([final_output, next_token_id], dim=-1)
+
+        print("strict load: ok")
+        print("prompt:", prompt)
+        print("input_ids shape:", tuple(input_ids.shape))
+        print("prefill logits shape:", tuple(output_logits.shape))
+        print("kv_cache layers:", len(kv_cache))
+        print("layer0 k_cache shape:", tuple(kv_cache[0][0].shape))
+        print("layer0 v_cache shape:", tuple(kv_cache[0][1].shape))
+        print("next_token_id:", next_token_id.tolist())
+        print("next_token_text:", tokenizer.decode(next_token_id[0].tolist()))
+
+        # 2. decode：后续每一步只把刚生成的一个token传入模型，历史K/V从kv_cache中复用
+        for step in range(1, max_new_tokens):
+            decode_logits = model(next_token_id, cache=kv_cache)
+            logits = decode_logits[:, -1, :]
+            next_token_id = torch.argmax(logits, dim=-1, keepdim=True)
+
+            generated_ids.append(next_token_id.item())
+            final_output = torch.cat([final_output, next_token_id], dim=-1)
+
+            print(
+                f"decode step {step}:",
+                "input shape =", tuple(next_token_id.shape),
+                "logits shape =", tuple(decode_logits.shape),
+                "next_token_id =", next_token_id.tolist(),
+                "next_token_text =", tokenizer.decode(next_token_id[0].tolist())
+            )
+
+            if tokenizer.eos_token_id is not None and next_token_id.item() == tokenizer.eos_token_id:
+                print("生成EOS，停止decode")
+                break
+
+        print("current_pos after decode:", model.current_pos)
+        print("layer0 k_cache shape after decode:", tuple(kv_cache[0][0].shape))
+        print("layer0 v_cache shape after decode:", tuple(kv_cache[0][1].shape))
+        print("generated token ids:", generated_ids)
+        print("generated text only:", tokenizer.decode(generated_ids))
+        print("full decoded text:", tokenizer.decode(final_output[0].tolist()))
+
+    return model
 
 def main():
     """
