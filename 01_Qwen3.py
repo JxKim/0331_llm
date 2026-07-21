@@ -23,6 +23,7 @@ QWEN_CONFIG_06_B = {
     "torch_dtype": torch.bfloat16,          # 低精度dtype，用于降低显存占用
 }
 # test 更新
+# 教师又更新了代码
 
 class Qwen3Model(nn.Module):
     def __init__(self, cfg):
