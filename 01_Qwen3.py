@@ -22,6 +22,7 @@ QWEN_CONFIG_06_B = {
     "tie_word_embeddings": True,            # 输入embedding和输出lm head是否共享权重
     "torch_dtype": torch.bfloat16,          # 低精度dtype，用于降低显存占用
 }
+# test 更新
 
 class Qwen3Model(nn.Module):
     def __init__(self, cfg):
