@@ -297,9 +297,23 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     # 计算每个位置的每组旋转的角度
     # positions: [0,1,2,3.... context_length]
     # positions.unsqueeze(1): (context_length,1) [[0],[1],[2],.... [context_length -1]]
+    # 广播后：（context_length, head_dim/2）
+    # [0, 0, 0]
+    # [1, 1, 1]
+    # [2, 2, 2] 
+
 
     # inv_feq:[100_0000 ^ (0),100_0000 ^ (-2/128),100_0000 ^ (-4/128),,100_0000 ^ (-6/128),100_0000 ^ (-126/128)]
     # inv_freq.unsqueeze(0): (1,head_dim // 2) [[100_0000 ** (-0), 100_0000 ** (-2/head_dim),100_0000 ** (-4/head_dim), ... ]]
+    # 广播后：(context_length, head_dim / 2)
+    # [theta_0, theta_1, theta_2]
+    # [theta_0, theta_1, theta_2]
+    # [theta_0, theta_1, theta_2]
+
+    # 哈达玛积运算
+    # [0* theata_0, 0* theta_1, 0* theta_2]
+    # [1*theta_0, 1*theta_1, 1*theta_2]
+    # [2*theta_0, 2*theta_1, 2*theta_2]
 
     # positions.unsqueeze(1) * inv_freq_unsqueeze(0) 运算时：
     #   1、前者的列会复制成 head_dim /2 列，后者的行，会复制成 context_length行
@@ -308,10 +322,17 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
 
+    # [0* theata_0, 0* theta_1, 0* theta_2]
+    # [1*theta_0, 1*theta_1, 1*theta_2]
+    # [2*theta_0, 2*theta_1, 2*theta_2]
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
 
     # 由于是前半部分和后半部分对应索引位置处做旋转，所以此处将angels复制，从而使得旋转的一组二维分量，共享一个angles值
     # head_dim=8时，一行会变成：[angle_0, angle_1, angle_2, angle_3, angle_0, angle_1, angle_2, angle_3]
+
+    # [0* theata_0, 0* theta_1, 0* theta_2,  0* theata_0, 0* theta_1, 0* theta_2]
+    # [1*theta_0, 1*theta_1, 1*theta_2,     1*theta_0, 1*theta_1, 1*theta_2]
+    # [2*theta_0, 2*theta_1, 2*theta_2,     2*theta_0, 2*theta_1, 2*theta_2]
     angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
     
     
@@ -345,6 +366,7 @@ def apply_rope(x, cos, sin, offset=0):
 
     具体例子：
         假设某个token在某个head上的向量为：
+        假设head_dim = 8 
             x = [x0, x1, x2, x3, x4, x5, x6, x7]
         当前position对应的角度为：
             angles = [a0, a1, a2, a3, a0, a1, a2, a3]
