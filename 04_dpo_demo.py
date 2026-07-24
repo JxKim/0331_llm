@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B-Base")
-
+from trl.trainer.sft_config import SFTConfig
 
 from dataclasses import dataclass
 
@@ -10,6 +10,7 @@ class DPOConfig:
     eval_data_size: int = 500
     lr: float = 3e-6 # DPO的学习率会比SFT的学习率，小一个数量级
     batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     warmup_ratio: float = 0.1
     save_dir: str = "./finetuned/03_dpo_demo"
     log_dir :str = "./logs/03_dpo_demo"
@@ -92,8 +93,8 @@ def create_answer_mask(labels,tokenizer:PreTrainedTokenizerFast):
         # 3.2、解析获得user_ends和assistant_ends
         user_ends,assistant_ends = _parse_conversation_turns(eos_position)
         # 3.3、设置answer mask
-        _set_answer_masks(answer_mask[idx],user_ends,assistant_ends)   
-    
+        _set_answer_masks(answer_mask[idx],user_ends,assistant_ends)
+
     # 4、结果返回:
     return answer_mask
 
@@ -142,7 +143,7 @@ def _set_answer_masks(mask,user_ends,assistant_ends):
     假设第一个eos_token_id index为10，第二个为15，第三个为20，第四个为25
     那么user_turns:[10,20]，assistant_ends:[15,25]
 
-    
+
     要想获取到assistant的回答的起始位置，就需要跳过<|im_end|>, \n, <|im_start|>,assistant , \n 这5个token
     要想获取到assistant的回答的结束位置，需要将<|im_end|>也包括进去，又因为列表切片是左闭右开的，所以需要向后移动一位
     """
@@ -161,9 +162,9 @@ def _set_answer_masks(mask,user_ends,assistant_ends):
             answer_start = user_end + 5
             answer_end = assistant_end + 1
             mask[answer_start:answer_end] = 1
-        
+
         # 处理最后一轮被截断的助手回答
-        last_user_end = user_ends[-1] 
+        last_user_end = user_ends[-1]
         last_answer_start = last_user_end + 5
         mask[last_answer_start:] = 1
 
@@ -203,11 +204,11 @@ def compute_log_probs(logits, labels, assistant_mask):
 
 
     # 3、对 对数概率，进行掩码，让非 assistant answer 部分，置为0，assistant answer，保留原值
-    # masked_label_token_log_prob.shape: batch_size, num_tokens 
+    # masked_label_token_log_prob.shape: batch_size, num_tokens
     masked_label_token_log_prob  = assistant_mask * label_token_log_prob
 
     # 、对 对数概率做相加，获取模型输出整个回答的对数概率
-    log_probs = masked_label_token_log_prob.sum(dim = -1) 
+    log_probs = masked_label_token_log_prob.sum(dim = -1)
 
     return log_probs
 
@@ -228,7 +229,7 @@ def cosine_decay(current_batch,total_batch,warmup_ratio,lr):
         # progress: 表示衰减过程，从0到1
         progress = (current_batch - warmup_batch)  / ( total_batch -warmup_batch)
         # progress从0到1的过程，cos从最大值，降到最小值
-        # cos(π * progress)，从1到-1 
+        # cos(π * progress)，从1到-1
         # （cos(π * progress)+1）*0.5 ，从1到0，表示衰减的程度
         decay_level = (np.cos(np.pi * progress) + 1) * 0.5
 
@@ -254,7 +255,7 @@ def eval_model(model,ref_model,dpo_config:DPOConfig):
         for sample in current_chosen_batch_data:
             padding_length = max_chosen_length - len(sample)
             sample.extend([tokenizer.pad_token_id] * padding_length)
-        
+
         chosen_data_tensor = torch.tensor(current_chosen_batch_data, dtype=torch.long).to("cuda")
         # input_ids:
         chosen_input_ids = chosen_data_tensor[:,:-1]
@@ -279,7 +280,7 @@ def eval_model(model,ref_model,dpo_config:DPOConfig):
         for sample in current_rejected_batch_data:
             padding_length = max_rejected_length - len(sample)
             sample.extend([tokenizer.pad_token_id] * padding_length)
-        
+
         rejected_data_tensor = torch.tensor(current_rejected_batch_data, dtype=torch.long).to("cuda")
         # input_ids:
         rejected_input_ids = rejected_data_tensor[:,:-1]
@@ -337,12 +338,12 @@ def eval_model(model,ref_model,dpo_config:DPOConfig):
                 ref_rejected_log_prob,
                 dpo_config.beta
             )
-        
+
         all_batch_loss.append(loss.item())
 
 
-        
-    
+
+
     average_loss = sum(all_batch_loss) / len(all_batch_loss)
 
     return average_loss
@@ -374,8 +375,8 @@ def train(dpo_config:DPOConfig):
     ref_model.eval()
     optimizer = AdamW(model.parameters(), lr=dpo_config.lr)
     loss_list = []
-    
-    
+
+
     # todo: 构建一个获取数据的方法
     # data: 第一个list，是所有数据，第二个list，是一条数据的message_list
     chosen_data, rejected_data = get_train_data(dpo_config)
@@ -393,7 +394,7 @@ def train(dpo_config:DPOConfig):
         for sample in current_chosen_batch_data:
             padding_length = max_chosen_length - len(sample)
             sample.extend([tokenizer.pad_token_id] * padding_length)
-        
+
         chosen_data_tensor = torch.tensor(current_chosen_batch_data, dtype=torch.long).to("cuda")
         # input_ids:
         chosen_input_ids = chosen_data_tensor[:,:-1]
@@ -418,7 +419,7 @@ def train(dpo_config:DPOConfig):
         for sample in current_rejected_batch_data:
             padding_length = max_rejected_length - len(sample)
             sample.extend([tokenizer.pad_token_id] * padding_length)
-        
+
         rejected_data_tensor = torch.tensor(current_rejected_batch_data, dtype=torch.long).to("cuda")
         # input_ids:
         rejected_input_ids = rejected_data_tensor[:,:-1]
@@ -436,7 +437,7 @@ def train(dpo_config:DPOConfig):
 
 
         # 4次前向传播
-         
+
         # 被训练的模型，两次前向传播
         chosen_output_logits = model(chosen_input_ids).logits
         rejected_output_logits = model(rejected_input_ids).logits
@@ -485,21 +486,25 @@ def train(dpo_config:DPOConfig):
         loss_list.append(loss.item())
 
 
-        loss.backward()
+        (loss / dpo_config.gradient_accumulation_steps).backward()
 
 
 
 
-        current_lr = cosine_decay(current_batch,total_batch,dpo_config.warmup_ratio,dpo_config.lr)
+        current_lr = optimizer.param_groups[0]["lr"]
+        should_step = (current_batch + 1) % dpo_config.gradient_accumulation_steps == 0 or current_batch == total_batch - 1
 
-        optimizer.param_groups[0]["lr"] = current_lr
+        if should_step:
+            current_lr = cosine_decay(current_batch,total_batch,dpo_config.warmup_ratio,dpo_config.lr)
 
-        optimizer.step()
+            optimizer.param_groups[0]["lr"] = current_lr
 
-        optimizer.zero_grad()
+            optimizer.step()
+
+            optimizer.zero_grad()
 
 
-        should_eval = current_batch % dpo_config.eval_iter == 0 
+        should_eval = current_batch % dpo_config.eval_iter == 0
         should_log = current_batch % dpo_config.log_iter  == 0
         if should_eval:
             average_loss = eval_model(model,ref_model,dpo_config)
@@ -525,11 +530,9 @@ def train(dpo_config:DPOConfig):
 
 
 def main():
-    dpo_config = DPOConfig(train_data_size=20000, batch_size=4)
+    dpo_config = DPOConfig(train_data_size=20000, batch_size=1)
     train(dpo_config=dpo_config)
 
 
 if __name__=="__main__":
     main()
-
-

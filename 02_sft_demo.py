@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B-Base")
-
+from transformers.models.deepseek_v3 import DeepseekV3ForCausalLM
 
 from dataclasses import dataclass
 
